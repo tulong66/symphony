@@ -1130,6 +1130,76 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server treats failed turn completed payloads as errors" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-failed-turn-completed-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-FAILED-TURN")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-failed-turn"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-failed-turn"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"method":"turn/completed","params":{"turn":{"id":"turn-failed-turn","status":"failed","error":{"message":"exceeded retry limit, last status: 429 Too Many Requests"}}}}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-failed-turn-completed",
+        identifier: "MT-FAILED-TURN",
+        title: "Failed turn completed",
+        description: "Ensure failed completed turns are surfaced as errors",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-FAILED-TURN",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      assert {:error, {:turn_failed, %{"turn" => %{"error" => %{"message" => message}, "status" => "failed"}}}} =
+               AppServer.run(workspace, "Surface failed turn", issue, on_message: on_message)
+
+      assert message =~ "429 Too Many Requests"
+      assert_received {:app_server_message, %{event: :turn_failed}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server captures codex side output and logs it through Logger" do
     test_root =
       Path.join(

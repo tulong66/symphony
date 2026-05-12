@@ -403,3 +403,92 @@ Then continue implementing from:
 ```text
 docs/superpowers/plans/2026-05-12-difficulty-tier-routing-plan.md
 ```
+
+## Channel smoke validation update
+
+After difficulty-tier routing was implemented and pushed, the next operational validation step changed from Linear issue creation to local channel smoke tests.
+
+Current task status:
+
+- Symphony mirofish service is running on `127.0.0.1:4002`.
+- Linear active candidate query for `mirofish-quant-engine-d86dd76535ce` returned `candidate_count=0`, so there are no current active issues to validate against.
+- Wrapper/channel inventory:
+  - `bin/agent-commands/codex-max` -> `/Users/deepzen/bin/codex-max app-server`
+  - `bin/agent-commands/codex-mimo` -> `/opt/homebrew/bin/codex -m mimo/mimo-v2.5-pro app-server`
+  - `bin/agent-commands/codex-low` -> `/opt/homebrew/bin/codex -m mimo/mimo-v2.5-pro app-server`
+- Local command availability:
+  - `/opt/homebrew/bin/codex --version` -> `codex-cli 0.130.0`
+  - `/Users/deepzen/bin/codex-max --version` -> `codex-cli 0.130.0`
+  - `claude --version` -> `2.1.139 (Claude Code)`
+
+Smoke test results:
+
+- `difficulty/medium` resolved to `codex-mimo` and completed a simple Chinese greeting turn via Codex app-server.
+- `difficulty/low` resolved to `codex-low` and completed a simple Chinese greeting turn via Codex app-server.
+- `difficulty/high` resolved to `codex-max` and completed a simple Chinese greeting turn via Codex app-server.
+- Claude Code CLI non-interactive prompt completed successfully with `你好，Claude Code smoke test。`
+
+Observation:
+
+- Each Codex app-server smoke run emitted a `Codex notification: "error"` debug line near the end, but `AppServer.run/4` returned `{:ok, %{result: :turn_completed, session_id: ..., thread_id: ..., turn_id: ...}}`. Treat this as a non-blocking observation to inspect later if it appears in real worker runs.
+
+Recommended next actions:
+
+1. Commit this smoke validation record if desired.
+2. Create or select low-risk Linear validation issues only after channel smoke tests are considered sufficient.
+3. Resume true end-to-end validation by creating/labeling high, medium, low, missing difficulty, and conflicting difficulty issues.
+
+## Linear operational validation update
+
+Validation issues created in project `mirofish-quant-engine-d86dd76535ce`:
+
+- `DEE-19` `difficulty/high` + `symphony/validation`
+- `DEE-20` `difficulty/medium` + `symphony/validation`
+- `DEE-21` `difficulty/low` + `symphony/validation`
+- `DEE-22` `symphony/validation` only
+- `DEE-23` `difficulty/high` + `difficulty/low` + `symphony/validation`
+
+All five validation issues were restored to `Backlog` after testing. Final dashboard state after restoration: `running=[]`, `retrying=[]`.
+
+Results:
+
+- `DEE-19` high route started worker/workspace/hook/Codex through `codex-max`; workspace exists at `~/code/symphony-workspaces/mirofish-quant-engine/DEE-19`.
+- `DEE-20` medium route started worker/workspace/hook/Codex through `codex-mimo`; workspace exists at `~/code/symphony-workspaces/mirofish-quant-engine/DEE-20`.
+- `DEE-21` low route started worker/workspace/hook/Codex through `codex-low`; workspace exists at `~/code/symphony-workspaces/mirofish-quant-engine/DEE-21`.
+- `DEE-22` missing difficulty label was blocked before worker/workspace creation with `missing difficulty label: expected exactly one of difficulty/high,difficulty/medium,difficulty/low`; no `DEE-22` workspace exists.
+- `DEE-23` conflicting difficulty labels were blocked before worker/workspace creation with `ambiguous difficulty labels: difficulty/high,difficulty/low`; no `DEE-23` workspace exists.
+
+Operational fixes/findings during validation:
+
+- The launchd service initially failed high-route Codex with `Missing environment variable: CLIPROXY_API_KEY`; with user approval, the current shell `CLIPROXY_API_KEY` was added to the local ignored `.env` and the `mirofish` service was restarted.
+- `AppServer` was fixed so `turn/completed` payloads with `turn.status == "failed"` return `{:error, {:turn_failed, params}}` instead of false success. Regression test added in `elixir/test/symphony_elixir/app_server_test.exs`.
+- After the env and AppServer fix, high/medium/low routes all reached Codex and failed with upstream `429 Too Many Requests`, not routing/config/workspace errors.
+
+Verification run after the AppServer fix:
+
+```text
+mise exec -- mix test test/symphony_elixir/app_server_test.exs:1133
+mise exec -- mix format --check-formatted lib/symphony_elixir/codex/app_server.ex test/symphony_elixir/app_server_test.exs
+mise exec -- mix test test/symphony_elixir/app_server_test.exs
+mise exec -- mix test test/symphony_elixir/app_server_test.exs test/symphony_elixir/core_test.exs test/symphony_elixir/orchestrator_status_test.exs
+mise exec -- mix specs.check
+mise exec -- mix build
+git diff --check
+```
+
+All listed checks passed.
+
+Next operational task:
+
+- Investigate Codex upstream `429 Too Many Requests` / CLIPROXY quota or rate-limit behavior, then rerun one real high/medium/low issue to full turn success.
+
+## Codex quota/rate-limit investigation update
+
+Follow-up probing showed the current Codex blockage is upstream quota/rate-limit, not Symphony routing:
+
+- `/Users/deepzen/bin/codex-max exec --skip-git-repo-check "请只回复：codex-max quota probe"` uses provider `cliproxyapi`, model `gpt-5.5`, and returns `429 Too Many Requests`.
+- `/opt/homebrew/bin/codex -m mimo/mimo-v2.5-pro exec --skip-git-repo-check "请只回复：codex-mimo quota probe"` also uses provider `cliproxyapi` and returns `429 Too Many Requests`.
+- `~/.codex/config.toml` currently has one configured provider, `cliproxyapi`, with base URL `http://127.0.0.1:8317/v1` and env key `CLIPROXY_API_KEY`.
+- `/opt/homebrew/bin/codex exec --ignore-user-config --skip-git-repo-check "请只回复：codex default provider probe"` switches to provider `openai`, but returns the ChatGPT/Codex usage-limit message: `You've hit your usage limit... try again at May 18th, 2026 8:14 AM.`
+
+Conclusion: all currently available Codex paths are quota/rate-limit blocked. Do not keep triggering Linear validation issues until quota/provider capacity is restored or an alternate provider is configured.
