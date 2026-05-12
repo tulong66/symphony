@@ -563,4 +563,11 @@ Low-tier root-cause check:
 - Alternate DeepSeek/Mimo route probes (`opgo/deepseek-v4-pro`, `ccr/opgo-deepseek-v4-pro`, `ds/v4-pro`, `opgo/mimo-v2.5-pro`) did not 429 in a minimal direct probe, but returned reasoning-only output for that probe.
 - `opgo/deepseek-v4-pro` remains unsuitable for real Codex app-server tool continuation because it previously failed with DeepSeek's `reasoning_content` requirement.
 
-Conclusion: high and medium short-link E2E smoke are clear; low routing reached the configured worker path, but `nv/deepseek-v4-pro` was later identified as an invalid/fake low-tier choice and returned upstream 429 during smoke. `codex-low` was moved to the ModelScope route `ms/DeepSeek-V4-Pro[1m]`. Local verification after the switch: `codex exec -m 'ms/DeepSeek-V4-Pro[1m]'` returned `MS_DEEPSEEK_PROBE_OK`, and a direct `AppServer.run/4` smoke through `bin/agent-commands/codex-low` returned `{:ok, %{result: :turn_completed, ...}}`.
+Conclusion: high and medium short-link E2E smoke are clear. Low routing reached the configured worker path with both `nv/deepseek-v4-pro` and `ms/DeepSeek-V4-Pro[1m]`, but both proved unsuitable for stable real E2E smoke: `nv/deepseek-v4-pro` was later identified as an invalid/fake low-tier choice and returned upstream 429, while ModelScope DeepSeek handled minimal probes but hit 429 during real workflow tool continuation. `codex-low` was switched to OpenCode Go MiniMax via `opgo/minimax-m2.7`; local verification showed `codex exec -m 'opgo/minimax-m2.7'`, direct CLIPROXY `/v1/responses`, and direct `AppServer.run/4` smoke all completed successfully.
+
+MiniMax low-only Linear E2E result:
+
+- After restarting `mirofish`, `DEE-26` ran through the `difficulty/low` route using `codex-low` -> `opgo/minimax-m2.7`.
+- The service created/reused workspace `~/code/symphony-workspaces/mirofish-quant-engine/DEE-26`, started Codex app-server, executed command/tool activity, and completed one turn.
+- `DEE-26` moved from `Backlog` -> `Todo` -> `In Progress` -> `Done`.
+- Final dashboard state was `running=[]`, `retrying=[]`; final observed tokens were roughly total=35,702, input=31,895, output=3,807.
