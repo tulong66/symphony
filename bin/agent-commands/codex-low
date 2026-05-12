@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec /opt/homebrew/bin/codex app-server -c 'model="opgo/mimo-v2.5-pro"' "$@"
+exec /opt/homebrew/bin/codex app-server -c 'model="opgo/deepseek-v4-pro"' "$@"
