@@ -541,3 +541,26 @@ Real `DEE-21` validation after restarting the `mirofish` service:
 - The service started a Codex session, streamed agent messages, executed commands, called dynamic tools, and accumulated token usage.
 - No 429, no retry entry, and no DeepSeek `reasoning_content` failure appeared during the observation window.
 - `DEE-21` was restored to `Backlog`; final dashboard state was `running=[]`, `retrying=[]`.
+
+## Short-link Linear E2E smoke update
+
+Created dedicated short smoke issues in Linear project `mirofish-quant-engine-d86dd76535ce`:
+
+- `DEE-24` `difficulty/high` + `symphony/validation`
+- `DEE-25` `difficulty/medium` + `symphony/validation`
+- `DEE-26` `difficulty/low` + `symphony/validation`
+
+Results:
+
+- `DEE-24` high route completed end-to-end and moved itself to `Done`.
+- `DEE-25` medium route completed end-to-end and moved itself to `Done`.
+- `DEE-26` low route started correctly through `codex-low`, executed commands/dynamic tools, moved to `In Progress`, then failed the Codex turn with upstream `429 Too Many Requests`. It was restored to `Backlog` after observation.
+- Final dashboard state after cleanup was `running=[]`, `retrying=[]`.
+
+Low-tier root-cause check:
+
+- Direct CLIPROXY `/v1/responses` call with model `nv/deepseek-v4-pro` also returned HTTP 429.
+- Alternate DeepSeek/Mimo route probes (`opgo/deepseek-v4-pro`, `ccr/opgo-deepseek-v4-pro`, `ds/v4-pro`, `opgo/mimo-v2.5-pro`) did not 429 in a minimal direct probe, but returned reasoning-only output for that probe.
+- `opgo/deepseek-v4-pro` remains unsuitable for real Codex app-server tool continuation because it previously failed with DeepSeek's `reasoning_content` requirement.
+
+Conclusion: high and medium short-link E2E smoke are clear; low routing reached the configured worker path, but `nv/deepseek-v4-pro` was later identified as an invalid/fake low-tier choice and returned upstream 429 during smoke. `codex-low` was moved to the ModelScope route `ms/DeepSeek-V4-Pro[1m]`. Local verification after the switch: `codex exec -m 'ms/DeepSeek-V4-Pro[1m]'` returned `MS_DEEPSEEK_PROBE_OK`, and a direct `AppServer.run/4` smoke through `bin/agent-commands/codex-low` returned `{:ok, %{result: :turn_completed, ...}}`.
