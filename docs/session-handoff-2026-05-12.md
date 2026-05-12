@@ -527,3 +527,17 @@ Service validation after restart:
 - The service-run worker no longer failed with 429; it started a Codex session and continued reasoning with token usage visible in the dashboard (`input_tokens` and `output_tokens` increasing).
 - `DEE-19` was restored to `Backlog`; final dashboard state after restoration was `running=[]`, `retrying=[]`.
 - The real `DEE-19` validation did not complete within the 120-second observation window because the full workflow prompt made Codex continue real ticket-style reasoning. For future quick service smoke, use a smaller dedicated validation issue/prompt that forces immediate completion.
+
+## Low-tier DeepSeek validation update
+
+`codex-low` was first switched to `opgo/deepseek-v4-pro`, but real `DEE-21` service validation failed during tool-call continuation with DeepSeek's `reasoning_content` requirement. Adding `model_reasoning_effort="none"` did not resolve that real worker failure.
+
+Follow-up CLIPROXY model probing showed `opgo/deepseek-v4-pro` and `ccr/opgo-deepseek-v4-pro` responses include reasoning output, while `nv/deepseek-v4-pro` returned message-only output for the probe. `codex-low` was therefore switched to `nv/deepseek-v4-pro`.
+
+Real `DEE-21` validation after restarting the `mirofish` service:
+
+- `DEE-21` started through the `difficulty/low` route and used the `codex-low` wrapper.
+- The worker created/reused the expected workspace at `~/code/symphony-workspaces/mirofish-quant-engine/DEE-21`.
+- The service started a Codex session, streamed agent messages, executed commands, called dynamic tools, and accumulated token usage.
+- No 429, no retry entry, and no DeepSeek `reasoning_content` failure appeared during the observation window.
+- `DEE-21` was restored to `Backlog`; final dashboard state was `running=[]`, `retrying=[]`.

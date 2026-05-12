@@ -191,7 +191,7 @@ hooks:
 
 - `codex-max` — high-capability `heihei/gpt-5.5` profile for `difficulty/high` issues.
 - `codex-mimo` — `opgo/mimo-v2.5-pro` profile for `difficulty/medium` issues.
-- `codex-low` — `opgo/deepseek-v4-pro` profile for `difficulty/low` issues.
+- `codex-low` — `nv/deepseek-v4-pro` profile for `difficulty/low` issues.
 
 Every Symphony-managed Linear issue in a multi-profile workflow must have exactly one of `difficulty/high`, `difficulty/medium`, or `difficulty/low`. Missing or conflicting difficulty labels are rejected before a worker is spawned.
 
