@@ -571,3 +571,27 @@ MiniMax low-only Linear E2E result:
 - The service created/reused workspace `~/code/symphony-workspaces/mirofish-quant-engine/DEE-26`, started Codex app-server, executed command/tool activity, and completed one turn.
 - `DEE-26` moved from `Backlog` -> `Todo` -> `In Progress` -> `Done`.
 - Final dashboard state was `running=[]`, `retrying=[]`; final observed tokens were roughly total=35,702, input=31,895, output=3,807.
+
+## Low-tier Qwen switch update
+
+Real operational validation later showed `opgo/minimax-m2.7` was not stable enough for the real low-risk `DEE-27` task. The worker reached the real workflow but failed with the provider error:
+
+```text
+Error from provider (MiniMax): invalid params, tool call result does not follow tool call (2013)
+```
+
+`DEE-27` was restored to `Backlog` after the failed run.
+
+Additional low-tier candidate checks:
+
+- `ms/Qwen3.5-397B[1m]` passed a minimal `codex exec` probe and a direct CLIPROXY `/v1/responses` probe, but failed Codex app-server command-continuation smoke with `429 Too Many Requests`.
+- OpenCode Go candidates that passed direct probe plus Codex app-server command-continuation smoke included `opgo/qwen3.6-plus`, `opgo/qwen3.5-plus`, `opgo/glm-5.1`, and `opgo/mimo-v2.5`.
+- `opgo/deepseek-v4-flash` and `opgo/kimi-k2.6` failed command-continuation smoke.
+
+Current selected low-tier route:
+
+```text
+bin/agent-commands/codex-low -> /opt/homebrew/bin/codex app-server -c 'model="opgo/qwen3.6-plus"' "$@"
+```
+
+Next operational validation step: restart the `mirofish` launchd service so it picks up the wrapper change, then rerun or recreate a real low-risk Linear validation issue such as `DEE-27`.

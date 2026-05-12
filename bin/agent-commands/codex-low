@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec /opt/homebrew/bin/codex app-server -c 'model="opgo/minimax-m2.7"' "$@"
+exec /opt/homebrew/bin/codex app-server -c 'model="opgo/qwen3.6-plus"' "$@"
