@@ -266,6 +266,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_codex_command_or_profiles()
+      |> validate_no_default_profile_with_profiles()
       |> validate_profile_references()
       |> validate_difficulty_routes()
     end
@@ -314,6 +315,17 @@ defmodule SymphonyElixir.Config.Schema do
         changeset
       else
         validate_required(changeset, [:command])
+      end
+    end
+
+    defp validate_no_default_profile_with_profiles(changeset) do
+      profiles = get_field(changeset, :profiles, %{})
+      default_profile = get_field(changeset, :default_profile)
+
+      if map_size(profiles) > 0 and is_binary(default_profile) do
+        add_error(changeset, :default_profile, "must not be set when codex.profiles is configured")
+      else
+        changeset
       end
     end
 

@@ -125,6 +125,27 @@ defmodule SymphonyElixir.CoreTest do
            ] = Config.settings!().codex.routes
   end
 
+  test "codex multi-profile config rejects default profile" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: "codex-mimo",
+      codex_profiles: %{
+        "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+        "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+        "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+      },
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.default_profile"
+    assert message =~ "must not be set"
+  end
+
   test "codex multi-profile config rejects invalid profile references" do
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_command: nil,
