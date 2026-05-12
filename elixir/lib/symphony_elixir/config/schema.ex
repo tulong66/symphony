@@ -155,9 +155,76 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    @difficulty_labels MapSet.new(["difficulty/high", "difficulty/medium", "difficulty/low"])
+
+    defmodule Profile do
+      @moduledoc false
+      use Ecto.Schema
+      import Ecto.Changeset
+
+      @primary_key false
+      embedded_schema do
+        field(:command, :string)
+      end
+
+      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+      def changeset(schema, attrs) do
+        schema
+        |> cast(attrs, [:command], empty_values: [])
+        |> validate_required([:command])
+      end
+    end
+
+    defmodule RouteLabels do
+      @moduledoc false
+      use Ecto.Schema
+      import Ecto.Changeset
+
+      @primary_key false
+      embedded_schema do
+        field(:any, {:array, :string}, default: [])
+      end
+
+      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+      def changeset(schema, attrs) do
+        changeset = cast(schema, attrs, [:any], empty_values: [])
+
+        labels = get_field(changeset, :any, [])
+
+        if Enum.any?(labels, &(is_binary(&1) and String.trim(&1) != "")) do
+          changeset
+        else
+          add_error(changeset, :any, "must include at least one label")
+        end
+      end
+    end
+
+    defmodule Route do
+      @moduledoc false
+      use Ecto.Schema
+      import Ecto.Changeset
+
+      @primary_key false
+      embedded_schema do
+        field(:profile, :string)
+        embeds_one(:labels, RouteLabels, on_replace: :update)
+      end
+
+      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+      def changeset(schema, attrs) do
+        schema
+        |> cast(attrs, [:profile], empty_values: [])
+        |> cast_embed(:labels, required: true)
+        |> validate_required([:profile])
+      end
+    end
+
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      field(:default_profile, :string)
+      field(:profiles, :map, default: %{})
+      embeds_many(:routes, Route, on_replace: :delete)
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -183,6 +250,7 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :default_profile,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
@@ -192,10 +260,129 @@ defmodule SymphonyElixir.Config.Schema do
         ],
         empty_values: []
       )
-      |> validate_required([:command])
+      |> put_profile_changes(attrs)
+      |> cast_embed(:routes)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_codex_command_or_profiles()
+      |> validate_profile_references()
+      |> validate_difficulty_routes()
+    end
+
+    @spec profiles(%__MODULE__{}) :: map()
+    def profiles(%__MODULE__{} = codex), do: Map.get(codex, :profiles, %{})
+
+    defp put_profile_changes(changeset, attrs) do
+      raw_profiles = Map.get(attrs, "profiles", Map.get(attrs, :profiles, %{}))
+
+      case cast_profiles(raw_profiles) do
+        {:ok, profiles} -> put_change(changeset, :profiles, profiles)
+        {:error, message} -> add_error(changeset, :profiles, message)
+      end
+    end
+
+    defp cast_profiles(nil), do: {:ok, %{}}
+    defp cast_profiles(raw_profiles) when raw_profiles == %{}, do: {:ok, %{}}
+
+    defp cast_profiles(raw_profiles) when is_map(raw_profiles) do
+      raw_profiles
+      |> Enum.reduce({:ok, %{}}, fn
+        {name, attrs}, {:ok, acc} when is_binary(name) and is_map(attrs) ->
+          changeset = Profile.changeset(%Profile{}, attrs)
+
+          if changeset.valid? do
+            {:ok, Map.put(acc, name, Ecto.Changeset.apply_changes(changeset))}
+          else
+            {:error, "invalid codex.profiles.#{name}.command"}
+          end
+
+        _entry, {:ok, _acc} ->
+          {:error, "must be a map of profile names to profile objects"}
+
+        _entry, {:error, _reason} = error ->
+          error
+      end)
+    end
+
+    defp cast_profiles(_raw_profiles), do: {:error, "must be a map of profile names to profile objects"}
+
+    defp validate_codex_command_or_profiles(changeset) do
+      profiles = get_field(changeset, :profiles, %{})
+
+      if map_size(profiles) > 0 do
+        changeset
+      else
+        validate_required(changeset, [:command])
+      end
+    end
+
+    defp validate_profile_references(changeset) do
+      profiles = get_field(changeset, :profiles, %{})
+      routes = get_field(changeset, :routes, [])
+
+      validate_route_profiles(changeset, profiles, routes)
+    end
+
+    defp validate_route_profiles(changeset, profiles, routes) do
+      Enum.reduce(routes, changeset, fn route, acc ->
+        if is_binary(route.profile) and Map.has_key?(profiles, route.profile) do
+          acc
+        else
+          add_error(acc, :routes, "profile #{inspect(route.profile)} must reference an existing codex profile")
+        end
+      end)
+    end
+
+    defp validate_difficulty_routes(changeset) do
+      profiles = get_field(changeset, :profiles, %{})
+      routes = get_field(changeset, :routes, [])
+
+      if map_size(profiles) == 0 do
+        changeset
+      else
+        route_labels = Enum.flat_map(routes, &difficulty_labels_for_route/1)
+        present = MapSet.new(route_labels)
+        missing = MapSet.difference(@difficulty_labels, present)
+        duplicates = duplicate_labels(route_labels)
+
+        cond do
+          MapSet.size(missing) > 0 ->
+            add_error(changeset, :routes, "must include difficulty routes for #{format_label_set(missing)}")
+
+          duplicates != [] ->
+            add_error(changeset, :routes, "must not duplicate difficulty routes for #{Enum.join(duplicates, ",")}")
+
+          true ->
+            changeset
+        end
+      end
+    end
+
+    defp difficulty_labels_for_route(%{labels: %{any: labels}}) when is_list(labels) do
+      labels
+      |> Enum.map(&normalize_route_label/1)
+      |> Enum.filter(&MapSet.member?(@difficulty_labels, &1))
+    end
+
+    defp difficulty_labels_for_route(_route), do: []
+
+    defp normalize_route_label(label) when is_binary(label), do: label |> String.trim() |> String.downcase()
+    defp normalize_route_label(_label), do: ""
+
+    defp duplicate_labels(labels) do
+      labels
+      |> Enum.frequencies()
+      |> Enum.filter(fn {_label, count} -> count > 1 end)
+      |> Enum.map(fn {label, _count} -> label end)
+      |> Enum.sort()
+    end
+
+    defp format_label_set(labels) do
+      labels
+      |> MapSet.to_list()
+      |> Enum.sort()
+      |> Enum.join(",")
     end
   end
 
@@ -543,7 +730,10 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp flatten_errors(errors, prefix) when is_list(errors) do
-    Enum.map(errors, &(prefix <> " " <> &1))
+    Enum.flat_map(errors, fn
+      item when is_map(item) -> flatten_errors(item, prefix)
+      item when is_binary(item) -> [prefix <> " " <> item]
+    end)
   end
 
   defp translate_error({message, options}) do

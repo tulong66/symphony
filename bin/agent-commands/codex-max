@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec /Users/deepzen/bin/codex-max app-server "$@"

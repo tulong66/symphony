@@ -16,6 +16,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   @type session :: %{
           port: port(),
           metadata: map(),
+          command: String.t(),
+          profile: String.t() | nil,
           approval_policy: String.t() | map(),
           auto_approve_requests: boolean(),
           thread_sandbox: String.t(),
@@ -27,7 +29,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, opts) do
+    with {:ok, session_opts} <- resolve_session_opts(issue, workspace, opts),
+         {:ok, session} <- start_session(workspace, session_opts) do
       try do
         run_turn(session, prompt, issue, opts)
       after
@@ -36,20 +39,38 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
+  defp resolve_session_opts(issue, workspace, opts) do
+    case Keyword.get(opts, :runtime_settings) do
+      nil ->
+        worker_host = Keyword.get(opts, :worker_host)
+
+        case Config.codex_runtime_settings_for_issue(issue, workspace, remote: is_binary(worker_host)) do
+          {:ok, runtime_settings} -> {:ok, Keyword.put(opts, :runtime_settings, runtime_settings)}
+          {:error, reason} -> {:error, reason}
+        end
+
+      _existing ->
+        {:ok, opts}
+    end
+  end
+
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
+    runtime_settings = Keyword.get(opts, :runtime_settings)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host) do
+         {:ok, session_policies} <- session_policies(expanded_workspace, worker_host, runtime_settings),
+         {:ok, port} <- start_port(expanded_workspace, worker_host, session_policies.command) do
       metadata = port_metadata(port, worker_host)
 
-      with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+      with {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
         {:ok,
          %{
            port: port,
            metadata: metadata,
+           command: session_policies.command,
+           profile: Map.get(session_policies, :profile),
            approval_policy: session_policies.approval_policy,
            auto_approve_requests: session_policies.approval_policy == "never",
            thread_sandbox: session_policies.thread_sandbox,
@@ -186,7 +207,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, nil) do
+  defp start_port(workspace, nil, command) when is_binary(command) do
     executable = System.find_executable("bash")
 
     if is_nil(executable) do
@@ -199,7 +220,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
+            args: [~c"-lc", String.to_charlist(command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]
@@ -209,15 +230,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp start_port(workspace, worker_host) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace)
+  defp start_port(workspace, worker_host, command) when is_binary(worker_host) and is_binary(command) do
+    remote_command = remote_launch_command(workspace, command)
     SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
   end
 
-  defp remote_launch_command(workspace) when is_binary(workspace) do
+  defp remote_launch_command(workspace, command) when is_binary(workspace) and is_binary(command) do
     [
       "cd #{shell_escape(workspace)}",
-      "exec #{Config.settings!().codex.command}"
+      "exec #{command}"
     ]
     |> Enum.join(" && ")
   end
@@ -262,12 +283,20 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp session_policies(workspace, nil) do
+  defp session_policies(workspace, nil, nil) do
     Config.codex_runtime_settings(workspace)
   end
 
-  defp session_policies(workspace, worker_host) when is_binary(worker_host) do
+  defp session_policies(_workspace, nil, runtime_settings) when is_map(runtime_settings) do
+    {:ok, runtime_settings}
+  end
+
+  defp session_policies(workspace, worker_host, nil) when is_binary(worker_host) do
     Config.codex_runtime_settings(workspace, remote: true)
+  end
+
+  defp session_policies(_workspace, worker_host, runtime_settings) when is_binary(worker_host) and is_map(runtime_settings) do
+    {:ok, runtime_settings}
   end
 
   defp do_start_session(port, workspace, session_policies) do

@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: bin/run-symphony [options]
+
+Options:
+  --name <name>        Instance name used for default logs root (default: default)
+  --workflow <path>    Workflow file to run (default: elixir/WORKFLOW.md)
+  --port <port>        Dashboard port to pass to Symphony
+  --logs-root <path>   Logs root to pass to Symphony (default: log/<name>)
+  --env <path>         Env file to load (default: .env)
+  --help               Show this help
+EOF
+}
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd "$script_dir/.." && pwd -P)"
+name="default"
+workflow="$repo_root/elixir/WORKFLOW.md"
+port=""
+logs_root=""
+env_file="$repo_root/.env"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --name)
+      [[ $# -ge 2 ]] || { echo "Missing value for --name" >&2; exit 2; }
+      name="$2"
+      shift 2
+      ;;
+    --workflow)
+      [[ $# -ge 2 ]] || { echo "Missing value for --workflow" >&2; exit 2; }
+      workflow="$2"
+      shift 2
+      ;;
+    --port)
+      [[ $# -ge 2 ]] || { echo "Missing value for --port" >&2; exit 2; }
+      port="$2"
+      shift 2
+      ;;
+    --logs-root)
+      [[ $# -ge 2 ]] || { echo "Missing value for --logs-root" >&2; exit 2; }
+      logs_root="$2"
+      shift 2
+      ;;
+    --env)
+      [[ $# -ge 2 ]] || { echo "Missing value for --env" >&2; exit 2; }
+      env_file="$2"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid --name: use only letters, numbers, dot, underscore, and dash" >&2
+  exit 2
+fi
+
+expand_path() {
+  local path="$1"
+  case "$path" in
+    ~) printf '%s\n' "$HOME" ;;
+    ~/*) printf '%s/%s\n' "$HOME" "${path#~/}" ;;
+    /*) printf '%s\n' "$path" ;;
+    *) printf '%s/%s\n' "$repo_root" "$path" ;;
+  esac
+}
+
+load_env_file() {
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" == *"="* ]] || continue
+
+    local key="${line%%=*}"
+    local value="${line#*=}"
+    key="${key//[[:space:]]/}"
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    value="${value#${value%%[![:space:]]*}}"
+    value="${value%${value##*[![:space:]]}}"
+
+    if [[ "${value:0:1}" == '"' && "${value: -1}" == '"' ]] || [[ "${value:0:1}" == "'" && "${value: -1}" == "'" ]]; then
+      value="${value:1:${#value}-2}"
+    fi
+
+    export "$key=$value"
+  done < "$env_file"
+}
+
+env_file="$(expand_path "$env_file")"
+load_env_file "$env_file"
+
+workflow="$(expand_path "$workflow")"
+logs_root="$(expand_path "${logs_root:-$repo_root/log/$name}")"
+escript="$repo_root/elixir/bin/symphony"
+mise_bin="${MISE_BIN:-/opt/homebrew/bin/mise}"
+
+if [[ -z "${LINEAR_API_KEY:-}" ]]; then
+  echo "LINEAR_API_KEY is not set. Add it to $env_file or export it before running." >&2
+  exit 1
+fi
+
+if [[ ! -f "$workflow" ]]; then
+  echo "Workflow file not found: $workflow" >&2
+  exit 1
+fi
+
+if [[ -n "$port" && ! "$port" =~ ^[0-9]+$ ]]; then
+  echo "Invalid --port: $port" >&2
+  exit 2
+fi
+
+if [[ ! -x "$escript" ]]; then
+  echo "Symphony executable not found: $escript" >&2
+  echo "Build it with: cd $repo_root/elixir && mise exec -- mix build" >&2
+  exit 1
+fi
+
+if [[ ! -x "$mise_bin" ]]; then
+  echo "mise executable not found: $mise_bin" >&2
+  echo "Install mise or set MISE_BIN to its absolute path." >&2
+  exit 1
+fi
+
+mkdir -p "$logs_root"
+
+args=(
+  "$mise_bin"
+  exec
+  -C "$repo_root/elixir"
+  --
+  "$escript"
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails
+  --logs-root "$logs_root"
+)
+
+if [[ -n "$port" ]]; then
+  args+=(--port "$port")
+fi
+
+args+=("$workflow")
+
+exec "${args[@]}"

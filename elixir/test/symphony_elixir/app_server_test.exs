@@ -1276,6 +1276,93 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server launches the command selected for the issue profile" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-selected-command-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-ROUTE")
+      max_binary = Path.join(test_root, "fake-codex-max")
+      mimo_binary = Path.join(test_root, "fake-codex-mimo")
+      low_binary = Path.join(test_root, "fake-codex-low")
+      trace_file = Path.join(test_root, "selected-command.trace")
+      previous_trace = System.get_env("SYMP_SELECTED_COMMAND_TRACE")
+
+      on_exit(fn -> restore_env("SYMP_SELECTED_COMMAND_TRACE", previous_trace) end)
+      System.put_env("SYMP_SELECTED_COMMAND_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      fake_codex = fn name ->
+        """
+        #!/bin/sh
+        printf '#{name}\\n' >> "${SYMP_SELECTED_COMMAND_TRACE}"
+        count=0
+        while IFS= read -r _line; do
+          count=$((count + 1))
+          case "$count" in
+            1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+            2) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-route"}}}' ;;
+            3) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-route"}}}' ;;
+            4) printf '%s\\n' '{"method":"turn/completed"}'; exit 0 ;;
+            *) exit 0 ;;
+          esac
+        done
+        """
+      end
+
+      File.write!(max_binary, fake_codex.("codex-max"))
+      File.write!(mimo_binary, fake_codex.("codex-mimo"))
+      File.write!(low_binary, fake_codex.("codex-low"))
+      File.chmod!(max_binary, 0o755)
+      File.chmod!(mimo_binary, 0o755)
+      File.chmod!(low_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: nil,
+        codex_default_profile: nil,
+        codex_profiles: %{
+          "codex-max" => %{"command" => "#{max_binary} app-server"},
+          "codex-mimo" => %{"command" => "#{mimo_binary} app-server"},
+          "codex-low" => %{"command" => "#{low_binary} app-server"}
+        },
+        codex_routes: [
+          %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+          %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+          %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+        ],
+        codex_approval_policy: "never"
+      )
+
+      high_issue = %Issue{
+        id: "issue-route-high",
+        identifier: "MT-ROUTE",
+        title: "Route high difficulty",
+        state: "In Progress",
+        labels: ["difficulty/high"]
+      }
+
+      medium_issue = %Issue{
+        id: "issue-route-medium",
+        identifier: "MT-ROUTE",
+        title: "Route medium difficulty",
+        state: "In Progress",
+        labels: ["difficulty/medium"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "High", high_issue)
+      assert {:ok, _result} = AppServer.run(workspace, "Medium", medium_issue)
+
+      assert File.read!(trace_file) == "codex-max\ncodex-mimo\n"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server launches over ssh for remote workers" do
     test_root =
       Path.join(
@@ -1403,6 +1490,54 @@ defmodule SymphonyElixir.AppServerTest do
                  false
                end
              end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server returns error without launching when runtime settings resolver fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-resolver-error-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-RESOLVEERR")
+      File.mkdir_p!(workspace)
+
+      # Write a valid workflow first so the WorkflowStore has a good state.
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root
+      )
+
+      # Overwrite the workflow file with unparseable content so that
+      # Config.codex_runtime_settings_for_issue/3 returns {:error, reason}.
+      # WorkflowStore keeps the last known-good config in memory; we force
+      # it to reload so it picks up the bad file and clears its cache.
+      workflow_path = Workflow.workflow_file_path()
+      File.write!(workflow_path, "not: valid: yaml: [[[")
+
+      if Process.whereis(SymphonyElixir.WorkflowStore) do
+        try do
+          SymphonyElixir.WorkflowStore.force_reload()
+        catch
+          :exit, _reason -> :ok
+        end
+      end
+
+      issue = %Issue{
+        id: "issue-resolver-error",
+        identifier: "MT-RESOLVEERR",
+        title: "Runtime settings resolver error",
+        description: "Config is broken; resolver must return error without launching",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-RESOLVEERR",
+        labels: []
+      }
+
+      assert {:error, _reason} = AppServer.run(workspace, "Should fail before launch", issue)
     after
       File.rm_rf(test_root)
     end

@@ -751,6 +751,34 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert due_in_ms > 0
   end
 
+  test "orchestrator snapshot exposes difficulty routing errors in retrying list" do
+    orchestrator_name = Module.concat(__MODULE__, :DifficultyRoutingSnapshotOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    retry_entry = %{
+      attempt: 1,
+      timer_ref: nil,
+      due_at_ms: System.monotonic_time(:millisecond) + 10_000,
+      identifier: "MT-DIFF",
+      error: "missing difficulty label: expected exactly one of difficulty/high,difficulty/medium,difficulty/low"
+    }
+
+    initial_state = :sys.get_state(pid)
+    new_state = %{initial_state | retry_attempts: %{"issue-diff" => retry_entry}}
+    :sys.replace_state(pid, fn _ -> new_state end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+
+    assert [entry] = snapshot.retrying
+    assert entry.issue_id == "issue-diff"
+    assert entry.identifier == "MT-DIFF"
+    assert entry.error =~ "missing difficulty label"
+  end
+
   test "orchestrator snapshot includes poll countdown and checking status" do
     orchestrator_name = Module.concat(__MODULE__, :PollingSnapshotOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)

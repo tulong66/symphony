@@ -314,6 +314,10 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec __test_dispatch_issue__(State.t(), Issue.t()) :: State.t()
+  def __test_dispatch_issue__(%State{} = state, %Issue{} = issue), do: do_dispatch_issue(state, issue, nil, nil)
+
+  @doc false
   @spec revalidate_issue_for_dispatch_for_test(Issue.t(), ([String.t()] -> term())) ::
           {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
   def revalidate_issue_for_dispatch_for_test(%Issue{} = issue, issue_fetcher)
@@ -553,7 +557,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed} = state,
+         %State{running: running, claimed: claimed, retry_attempts: retry_attempts} = state,
          active_states,
          terminal_states
        ) do
@@ -561,6 +565,7 @@ defmodule SymphonyElixir.Orchestrator do
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
+      !Map.has_key?(retry_attempts, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
       worker_slots_available?(state)
@@ -686,13 +691,19 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        case Config.codex_runtime_settings_for_issue(issue, nil, remote: is_binary(worker_host)) do
+          {:ok, runtime_settings} ->
+            spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, runtime_settings)
+
+          {:error, reason} ->
+            record_dispatch_routing_error(state, issue, attempt, worker_host, reason)
+        end
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, runtime_settings) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host, runtime_settings: runtime_settings)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -741,6 +752,29 @@ defmodule SymphonyElixir.Orchestrator do
         })
     end
   end
+
+  defp record_dispatch_routing_error(%State{} = state, %Issue{} = issue, attempt, worker_host, reason) do
+    error = format_dispatch_routing_error(reason)
+    next_attempt = if is_integer(attempt), do: attempt + 1, else: 1
+
+    Logger.warning("Skipping dispatch for #{issue_context(issue)} error=#{error}")
+
+    schedule_issue_retry(state, issue.id, next_attempt, %{
+      identifier: issue.identifier,
+      error: error,
+      worker_host: worker_host
+    })
+  end
+
+  defp format_dispatch_routing_error({:missing_difficulty_label, _issue_identifier}) do
+    "missing difficulty label: expected exactly one of difficulty/high,difficulty/medium,difficulty/low"
+  end
+
+  defp format_dispatch_routing_error({:ambiguous_difficulty_labels, labels}) when is_list(labels) do
+    "ambiguous difficulty labels: #{Enum.join(labels, ",")}"
+  end
+
+  defp format_dispatch_routing_error(reason), do: "routing failed: #{inspect(reason)}"
 
   defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do

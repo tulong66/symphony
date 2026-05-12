@@ -1,0 +1,6 @@
+.gitnexus
+
+.env
+
+__pycache__/
+*.pyc

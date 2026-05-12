@@ -88,6 +88,174 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "codex multi-profile config validates and preserves legacy command mode" do
+    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/legacy app-server")
+
+    assert :ok = Config.validate!()
+    assert Config.settings!().codex.command == "/bin/legacy app-server"
+    assert Config.settings!().codex.default_profile == nil
+    assert Config.settings!().codex.profiles == %{}
+    assert Config.settings!().codex.routes == []
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: %{
+        "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+        "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+        "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+      },
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    assert :ok = Config.validate!()
+    assert Config.settings!().codex.default_profile == nil
+    assert Config.settings!().codex.profiles["codex-max"].command == "/tmp/codex-max app-server"
+    assert Config.settings!().codex.profiles["codex-mimo"].command == "/tmp/codex-mimo app-server"
+    assert Config.settings!().codex.profiles["codex-low"].command == "/tmp/codex-low app-server"
+
+    assert [
+             %{profile: "codex-max", labels: %{any: ["difficulty/high"]}},
+             %{profile: "codex-mimo", labels: %{any: ["difficulty/medium"]}},
+             %{profile: "codex-low", labels: %{any: ["difficulty/low"]}}
+           ] = Config.settings!().codex.routes
+  end
+
+  test "codex multi-profile config rejects invalid profile references" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: %{
+        "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+        "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+        "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+      },
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-nonexistent", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.routes"
+    assert message =~ "codex-nonexistent"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: %{"codex-mimo" => %{"command" => ""}},
+      codex_routes: [
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.profiles.codex-mimo.command"
+  end
+
+  test "codex multi-profile config requires high medium and low difficulty routes" do
+    profiles = %{
+      "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+      "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+      "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: profiles,
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.routes"
+    assert message =~ "difficulty/low"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: profiles,
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/high"]}}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.routes"
+    assert message =~ "difficulty/high"
+  end
+
+  test "codex multi-profile config rejects routes with empty labels.any list" do
+    base_profiles = %{
+      "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+      "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+      "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: base_profiles,
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => []}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.routes"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: base_profiles,
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.routes"
+  end
+
+  test "codex multi-profile config rejects routes with whitespace-only labels.any" do
+    base_profiles = %{
+      "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+      "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+      "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: base_profiles,
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["   "]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "codex.routes"
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
@@ -543,6 +711,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    before_retry_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -551,7 +720,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, before_retry_ms, 500, 1_100)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -584,6 +753,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    before_retry_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -591,7 +761,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, before_retry_ms, 40_000, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -623,6 +793,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    before_retry_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -630,7 +801,60 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_in_range(due_at_ms, before_retry_ms, 10_000, 10_500)
+  end
+
+  test "orchestrator records difficulty routing errors without spawning worker" do
+    issue_id = "issue-missing-difficulty"
+    orchestrator_name = Module.concat(__MODULE__, :DifficultyRoutingOrchestrator)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: %{
+        "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+        "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+        "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+      },
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-ROUTE",
+      title: "Missing difficulty",
+      state: "Todo",
+      labels: ["backend"],
+      assigned_to_worker: true
+    }
+
+    initial_state = :sys.get_state(pid)
+
+    refreshed =
+      :sys.replace_state(pid, fn _ ->
+        initial_state
+        |> Map.put(:running, %{})
+        |> Map.put(:claimed, MapSet.new())
+        |> Map.put(:retry_attempts, %{})
+      end)
+
+    dispatched = Orchestrator.__test_dispatch_issue__(refreshed, issue)
+
+    assert dispatched.running == %{}
+    refute MapSet.member?(dispatched.claimed, issue_id)
+    assert %{attempt: 1, identifier: "MT-ROUTE", error: error} = dispatched.retry_attempts[issue_id]
+    assert error =~ "missing difficulty label"
+    refute Orchestrator.should_dispatch_issue_for_test(issue, dispatched)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -750,11 +974,11 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  defp assert_due_in_range(due_at_ms, measured_from_ms, min_delay_ms, max_delay_ms) do
+    delay_ms = due_at_ms - measured_from_ms
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+    assert delay_ms >= min_delay_ms
+    assert delay_ms <= max_delay_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
@@ -990,6 +1214,46 @@ defmodule SymphonyElixir.CoreTest do
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
     assert prompt == "Retry #2"
+  end
+
+  test "agent runner direct call rejects missing difficulty before workspace creation" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-routing-fallback-#{System.unique_integer([:positive])}")
+    workspace_root = Path.join(test_root, "workspaces")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: workspace_root,
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: %{
+        "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+        "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+        "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+      },
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    issue = %Issue{
+      id: "issue-direct-missing-difficulty",
+      identifier: "MT-DIRECT",
+      title: "Direct call missing difficulty",
+      description: "No worker should start",
+      state: "Todo",
+      labels: ["backend"]
+    }
+
+    try do
+      assert_raise RuntimeError, ~r/missing_difficulty_label/, fn ->
+        AgentRunner.run(issue)
+      end
+
+      refute File.exists?(workspace_root)
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "agent runner keeps workspace after successful codex run" do
@@ -1691,6 +1955,72 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "codex runtime settings select profile from exactly one difficulty label" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: %{
+        "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+        "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+        "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+      },
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ],
+      codex_approval_policy: "never"
+    )
+
+    assert {:ok, high_settings} = Config.codex_runtime_settings_for_issue(%Issue{id: "issue-high", labels: [" backend ", " Difficulty/High "]})
+    assert high_settings.command == "/tmp/codex-max app-server"
+    assert high_settings.profile == "codex-max"
+    assert high_settings.approval_policy == "never"
+
+    assert {:ok, medium_settings} = Config.codex_runtime_settings_for_issue(%Issue{id: "issue-medium", labels: ["difficulty/medium"]})
+    assert medium_settings.command == "/tmp/codex-mimo app-server"
+    assert medium_settings.profile == "codex-mimo"
+
+    assert {:ok, low_settings} = Config.codex_runtime_settings_for_issue(%Issue{id: "issue-low", labels: ["difficulty/low"]})
+    assert low_settings.command == "/tmp/codex-low app-server"
+    assert low_settings.profile == "codex-low"
+  end
+
+  test "codex runtime settings reject missing and ambiguous difficulty labels" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: nil,
+      codex_default_profile: nil,
+      codex_profiles: %{
+        "codex-max" => %{"command" => "/tmp/codex-max app-server"},
+        "codex-mimo" => %{"command" => "/tmp/codex-mimo app-server"},
+        "codex-low" => %{"command" => "/tmp/codex-low app-server"}
+      },
+      codex_routes: [
+        %{"profile" => "codex-max", "labels" => %{"any" => ["difficulty/high"]}},
+        %{"profile" => "codex-mimo", "labels" => %{"any" => ["difficulty/medium"]}},
+        %{"profile" => "codex-low", "labels" => %{"any" => ["difficulty/low"]}}
+      ]
+    )
+
+    assert {:error, {:missing_difficulty_label, "issue-empty"}} =
+             Config.codex_runtime_settings_for_issue(%Issue{id: "issue-empty", labels: ["backend"]})
+
+    assert {:error, {:ambiguous_difficulty_labels, ["difficulty/high", "difficulty/low"]}} =
+             Config.codex_runtime_settings_for_issue(%Issue{id: "issue-conflict", labels: ["difficulty/low", "difficulty/high"]})
+  end
+
+  test "codex runtime settings preserve legacy command mode" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_command: "/tmp/legacy app-server",
+      codex_approval_policy: "never"
+    )
+
+    assert {:ok, settings} = Config.codex_runtime_settings_for_issue(%Issue{id: "issue-legacy", labels: ["difficulty/high"]})
+    assert settings.command == "/tmp/legacy app-server"
+    assert settings.profile == nil
+    assert settings.approval_policy == "never"
   end
 
   test "app server startup payload uses configurable approval and sandbox settings from workflow config" do

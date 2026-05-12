@@ -14,6 +14,20 @@ defmodule SymphonyElixir.AgentRunner do
     # The orchestrator owns host retries so one worker lifetime never hops machines.
     worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
 
+    runtime_settings =
+      case Keyword.get(opts, :runtime_settings) do
+        nil ->
+          case Config.codex_runtime_settings_for_issue(issue, nil, remote: is_binary(worker_host)) do
+            {:ok, settings} -> settings
+            {:error, reason} -> raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+          end
+
+        settings ->
+          settings
+      end
+
+    opts = Keyword.put(opts, :runtime_settings, runtime_settings)
+
     Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
     case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
@@ -80,7 +94,19 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    runtime_settings =
+      case Keyword.get(opts, :runtime_settings) do
+        nil ->
+          case Config.codex_runtime_settings_for_issue(issue, workspace, remote: is_binary(worker_host)) do
+            {:ok, settings} -> settings
+            {:error, reason} -> throw({:codex_runtime_settings_failed, reason})
+          end
+
+        settings ->
+          settings
+      end
+
+    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host, runtime_settings: runtime_settings) do
       try do
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after

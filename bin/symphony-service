@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import plistlib
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+LABEL_PREFIX = "com.deepzen.symphony"
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def domain() -> str:
+    return f"gui/{os.getuid()}"
+
+
+def validate_name(name: str) -> None:
+    if not NAME_RE.match(name):
+        raise SystemExit("Invalid service name: use only letters, numbers, dot, underscore, and dash")
+
+
+def label(name: str) -> str:
+    validate_name(name)
+    return f"{LABEL_PREFIX}.{name}"
+
+
+def plist_path(name: str) -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{label(name)}.plist"
+
+
+def default_logs_root(name: str) -> Path:
+    return repo_root() / "log" / "services" / name
+
+
+def shim_path(name: str) -> Path:
+    validate_name(name)
+    return Path.home() / "Library" / "Application Support" / "Symphony" / "shims" / f"run-symphony-{name}"
+
+
+def expand_path(raw: str) -> Path:
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = repo_root() / path
+    return path.resolve()
+
+
+def validate_port(raw: str) -> int:
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise SystemExit(f"Invalid port: {raw}") from exc
+    if port < 1 or port > 65535:
+        raise SystemExit(f"Invalid port: {raw}; expected 1..65535")
+    return port
+
+
+def service_paths(name: str) -> tuple[Path, Path, Path]:
+    path = plist_path(name)
+    if path.exists():
+        with path.open("rb") as handle:
+            plist = plistlib.load(handle)
+        stdout_path = Path(plist.get("StandardOutPath", default_logs_root(name) / "stdout.log"))
+        stderr_path = Path(plist.get("StandardErrorPath", default_logs_root(name) / "stderr.log"))
+        return stdout_path.parent, stdout_path, stderr_path
+    root = default_logs_root(name)
+    return root, root / "stdout.log", root / "stderr.log"
+
+
+def shell_quote(path: Path | str) -> str:
+    return shlex.quote(str(path))
+
+
+def build_shim(workflow: Path, port: int, logs_root: Path, env_file: Path) -> str:
+    root = repo_root()
+    escript = root / "elixir" / "bin" / "symphony"
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+load_env_file() {{
+  local env_file="$1"
+  [[ -f "$env_file" ]] || return 0
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${{line%$'\\r'}}"
+    [[ -z "${{line//[[:space:]]/}}" ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" == *"="* ]] || continue
+
+    local key="${{line%%=*}}"
+    local value="${{line#*=}}"
+    key="${{key//[[:space:]]/}}"
+
+    [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+
+    value="${{value#${{value%%[![:space:]]*}}}}"
+    value="${{value%${{value##*[![:space:]]}}}}"
+
+    if [[ "${{value:0:1}}" == '"' && "${{value: -1}}" == '"' ]] || [[ "${{value:0:1}}" == "'" && "${{value: -1}}" == "'" ]]; then
+      value="${{value:1:${{#value}}-2}}"
+    fi
+
+    export "$key=$value"
+  done < "$env_file"
+}}
+
+env_file={shell_quote(env_file)}
+logs_root={shell_quote(logs_root)}
+
+load_env_file "$env_file"
+
+if [[ -z "${{LINEAR_API_KEY:-}}" ]]; then
+  echo "LINEAR_API_KEY is not set. Add it to $env_file or export it before running." >&2
+  exit 1
+fi
+
+mkdir -p "$logs_root"
+
+exec /opt/homebrew/bin/mise exec -C {shell_quote(root / "elixir")} -- {shell_quote(escript)} \\
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails \\
+  --logs-root "$logs_root" \\
+  --port {port} \\
+  {shell_quote(workflow)}
+"""
+
+
+def build_plist(name: str, workflow: Path, port: int, logs_root: Path, env_file: Path) -> dict:
+    stdout_path = logs_root / "stdout.log"
+    stderr_path = logs_root / "stderr.log"
+    return {
+        "Label": label(name),
+        "ProgramArguments": [
+            "/bin/bash",
+            str(shim_path(name)),
+        ],
+        "WorkingDirectory": str(Path.home()),
+        "RunAtLoad": False,
+        "KeepAlive": True,
+        "StandardOutPath": str(stdout_path),
+        "StandardErrorPath": str(stderr_path),
+    }
+
+
+def run_launchctl(args: list[str], check: bool = False) -> subprocess.CompletedProcess:
+    return subprocess.run(["launchctl", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=check)
+
+
+def is_loaded(name: str) -> bool:
+    result = run_launchctl(["print", f"{domain()}/{label(name)}"])
+    return result.returncode == 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    validate_name(args.name)
+    workflow = expand_path(args.workflow)
+    if not workflow.is_file():
+        raise SystemExit(f"Workflow file not found: {workflow}")
+    port = validate_port(args.port)
+    logs_root = expand_path(args.logs_root) if args.logs_root else default_logs_root(args.name)
+    env_file = expand_path(args.env) if args.env else repo_root() / ".env"
+    plist = build_plist(args.name, workflow, port, logs_root, env_file)
+    payload = plistlib.dumps(plist, sort_keys=False)
+
+    if args.dry_run:
+        sys.stdout.buffer.write(payload)
+        return 0
+
+    path = shim_path(args.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(build_shim(workflow, port, logs_root, env_file))
+    path.chmod(0o755)
+    plist_path(args.name).parent.mkdir(parents=True, exist_ok=True)
+    logs_root.mkdir(parents=True, exist_ok=True)
+    plist_path(args.name).write_bytes(payload)
+    print(f"Installed {label(args.name)}")
+    print(f"Plist: {plist_path(args.name)}")
+    print(f"Shim: {path}")
+    print(f"Logs: {logs_root}")
+    return 0
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    validate_name(args.name)
+    path = plist_path(args.name)
+    if not path.is_file():
+        raise SystemExit(f"Service is not installed: {path}")
+    if not is_loaded(args.name):
+        result = run_launchctl(["bootstrap", domain(), str(path)])
+        if result.returncode != 0 and "service already loaded" not in result.stderr.lower():
+            sys.stderr.write(result.stderr)
+            return result.returncode
+    result = run_launchctl(["kickstart", "-k", f"{domain()}/{label(args.name)}"])
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        return result.returncode
+    print(f"Started {label(args.name)}")
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    validate_name(args.name)
+    if not is_loaded(args.name):
+        print(f"Already stopped {label(args.name)}")
+        return 0
+    result = run_launchctl(["bootout", f"{domain()}/{label(args.name)}"])
+    if result.returncode != 0:
+        sys.stderr.write(result.stderr)
+        return result.returncode
+    print(f"Stopped {label(args.name)}")
+    return 0
+
+
+def cmd_restart(args: argparse.Namespace) -> int:
+    stop_args = argparse.Namespace(name=args.name)
+    cmd_stop(stop_args)
+    return cmd_start(args)
+
+
+def installed_services() -> list[Path]:
+    launch_agents = Path.home() / "Library" / "LaunchAgents"
+    return sorted(launch_agents.glob(f"{LABEL_PREFIX}.*.plist")) if launch_agents.exists() else []
+
+
+def name_from_plist(path: Path) -> str:
+    suffix = path.name.removeprefix(f"{LABEL_PREFIX}.").removesuffix(".plist")
+    return suffix
+
+
+def status_line(name: str) -> str:
+    state = "loaded" if is_loaded(name) else "stopped"
+    return f"{name}\t{state}\t{plist_path(name)}"
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    if args.name:
+        validate_name(args.name)
+        print(status_line(args.name))
+        if is_loaded(args.name):
+            result = run_launchctl(["print", f"{domain()}/{label(args.name)}"])
+            if result.stdout:
+                print(result.stdout.rstrip())
+        return 0
+    for path in installed_services():
+        print(status_line(name_from_plist(path)))
+    return 0
+
+
+def cmd_list(_args: argparse.Namespace) -> int:
+    for path in installed_services():
+        print(f"{name_from_plist(path)}\t{path}")
+    return 0
+
+
+def cmd_logs(args: argparse.Namespace) -> int:
+    validate_name(args.name)
+    logs_root, stdout_path, stderr_path = service_paths(args.name)
+    if not logs_root.exists():
+        print(f"Logs directory does not exist yet: {logs_root}")
+        return 0
+    paths = [stdout_path, stderr_path]
+    if args.follow:
+        existing = [str(path) for path in paths if path.exists()]
+        if not existing:
+            print(f"No log files exist yet under {logs_root}")
+            return 0
+        return subprocess.call(["tail", "-f", *existing])
+    for path in paths:
+        print(f"==> {path} <==")
+        if path.exists():
+            print(path.read_text(errors="replace").rstrip())
+        else:
+            print("(missing)")
+    return 0
+
+
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    validate_name(args.name)
+    cmd_stop(argparse.Namespace(name=args.name))
+    path = plist_path(args.name)
+    if path.exists():
+        path.unlink()
+        print(f"Removed {path}")
+    else:
+        print(f"Service plist already absent: {path}")
+    shim = shim_path(args.name)
+    if shim.exists():
+        shim.unlink()
+        print(f"Removed {shim}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Manage local Symphony launchd service instances")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    install = subparsers.add_parser("install", help="Install a launchd service plist")
+    install.add_argument("name")
+    install.add_argument("--workflow", required=True)
+    install.add_argument("--port", required=True)
+    install.add_argument("--logs-root")
+    install.add_argument("--env")
+    install.add_argument("--dry-run", action="store_true")
+    install.set_defaults(func=cmd_install)
+
+    for command, help_text, func in [
+        ("start", "Start an installed service", cmd_start),
+        ("stop", "Stop a loaded service", cmd_stop),
+        ("restart", "Restart an installed service", cmd_restart),
+        ("uninstall", "Stop and remove an installed service", cmd_uninstall),
+    ]:
+        sub = subparsers.add_parser(command, help=help_text)
+        sub.add_argument("name")
+        sub.set_defaults(func=func)
+
+    status = subparsers.add_parser("status", help="Show service status")
+    status.add_argument("name", nargs="?")
+    status.set_defaults(func=cmd_status)
+
+    list_parser = subparsers.add_parser("list", help="List installed Symphony services")
+    list_parser.set_defaults(func=cmd_list)
+
+    logs = subparsers.add_parser("logs", help="Print or follow service logs")
+    logs.add_argument("name")
+    logs.add_argument("--follow", "-f", action="store_true")
+    logs.set_defaults(func=cmd_logs)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
