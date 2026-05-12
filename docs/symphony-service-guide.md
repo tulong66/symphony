@@ -189,9 +189,9 @@ hooks:
 
 `symphony/bin/agent-commands/` hosts per-provider/model wrapper scripts used by workflow profile routing. The current `mirofish-quant-engine` workflow uses explicit difficulty-tier routing:
 
-- `codex-max` — high-capability heihei GPT-5.5 profile for `difficulty/high` issues.
-- `codex-mimo` — `mimo/mimo-v2.5-pro` profile for `difficulty/medium` issues.
-- `codex-low` — low-tier profile for `difficulty/low` issues; it currently reuses the same `mimo/mimo-v2.5-pro` command as `codex-mimo` until a cheaper low-tier worker is configured.
+- `codex-max` — high-capability `heihei/gpt-5.5` profile for `difficulty/high` issues.
+- `codex-mimo` — `opgo/mimo-v2.5-pro` profile for `difficulty/medium` issues.
+- `codex-low` — low-tier profile for `difficulty/low` issues; it currently reuses the same `opgo/mimo-v2.5-pro` command as `codex-mimo` until a cheaper low-tier worker is configured.
 
 Every Symphony-managed Linear issue in a multi-profile workflow must have exactly one of `difficulty/high`, `difficulty/medium`, or `difficulty/low`. Missing or conflicting difficulty labels are rejected before a worker is spawned.
 

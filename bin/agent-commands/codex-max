@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-exec /Users/deepzen/bin/codex-max app-server "$@"
+exec /opt/homebrew/bin/codex --dangerously-bypass-approvals-and-sandbox app-server -c 'model="heihei/gpt-5.5"' "$@"

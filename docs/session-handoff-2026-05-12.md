@@ -492,3 +492,38 @@ Follow-up probing showed the current Codex blockage is upstream quota/rate-limit
 - `/opt/homebrew/bin/codex exec --ignore-user-config --skip-git-repo-check "请只回复：codex default provider probe"` switches to provider `openai`, but returns the ChatGPT/Codex usage-limit message: `You've hit your usage limit... try again at May 18th, 2026 8:14 AM.`
 
 Conclusion: all currently available Codex paths are quota/rate-limit blocked. Do not keep triggering Linear validation issues until quota/provider capacity is restored or an alternate provider is configured.
+
+## Codex quota/rate-limit resolution update
+
+Later probing showed the earlier conclusion was too broad:
+
+- Direct CLIPROXY `/v1/responses` calls with model `heihei/gpt-5.5` succeeded.
+- Direct CLIPROXY calls with model `gpt-5.5` returned `model_cooldown` for provider `codex`.
+- Direct CLIPROXY calls with model `mimo/mimo-v2.5-pro` returned `quota exhausted`.
+- `codex exec -m heihei/gpt-5.5 ...` succeeded.
+- `codex exec -m opgo/mimo-v2.5-pro ...` succeeded.
+- `codex app-server` did not honor the wrapper's top-level `-m ...` as expected for these app-server runs; `codex app-server -c 'model="..."'` did work.
+
+Wrapper changes made:
+
+- `bin/agent-commands/codex-max` now runs `/opt/homebrew/bin/codex --dangerously-bypass-approvals-and-sandbox app-server -c 'model="heihei/gpt-5.5"' "$@"`.
+- `bin/agent-commands/codex-mimo` now runs `/opt/homebrew/bin/codex app-server -c 'model="opgo/mimo-v2.5-pro"' "$@"`.
+- `bin/agent-commands/codex-low` now runs `/opt/homebrew/bin/codex app-server -c 'model="opgo/mimo-v2.5-pro"' "$@"`.
+
+Local AppServer smoke after the wrapper change showed all three routes completed successfully:
+
+```text
+difficulty/high   -> {:ok, %{result: :turn_completed, ...}}
+difficulty/medium -> {:ok, %{result: :turn_completed, ...}}
+difficulty/low    -> {:ok, %{result: :turn_completed, ...}}
+```
+
+Remaining validation: restart the `mirofish` launchd service so it picks up the wrapper changes, then rerun one real Linear validation issue to confirm service-run success.
+
+Service validation after restart:
+
+- `mirofish` launchd service was restarted and dashboard returned HTTP 200.
+- Triggered real `DEE-19` high route after wrapper changes.
+- The service-run worker no longer failed with 429; it started a Codex session and continued reasoning with token usage visible in the dashboard (`input_tokens` and `output_tokens` increasing).
+- `DEE-19` was restored to `Backlog`; final dashboard state after restoration was `running=[]`, `retrying=[]`.
+- The real `DEE-19` validation did not complete within the 120-second observation window because the full workflow prompt made Codex continue real ticket-style reasoning. For future quick service smoke, use a smaller dedicated validation issue/prompt that forces immediate completion.
